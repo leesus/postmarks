@@ -1,5 +1,8 @@
-import { Postmarks, type Link } from './objects/postmarks';
-export { Postmarks };
+import { Postmarks } from './objects/postmarks';
+import { LinksWorkflow } from './workflows/links';
+import { sendEmail } from './services/send-email';
+
+export { Postmarks, LinksWorkflow };
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
@@ -18,21 +21,15 @@ export default {
 
 		if (subject.startsWith('add')) {
 			const body = TextBody.trim();
-			const link = await postmarks.addLink(From, body);
-			ctx.waitUntil(
-				sendEmail(env, {
-					to: From as string,
-					subject: 'New link added',
-					links: [link],
-				})
-			);
+			await env.WORKFLOW.create({ params: { email: From as string, url: body } });
 		} else if (subject.startsWith('list')) {
 			const links = await postmarks.getLinks();
 			ctx.waitUntil(
 				sendEmail(env, {
 					to: From as string,
 					subject: 'Your links',
-					links,
+					text: links.map((link) => `${link.url} - Added ${link.created_at}`).join('\n'),
+					html: links.map((link) => `<a href="${link.url}">${link.url}</a> - Added ${link.created_at}`).join('<br />'),
 				})
 			);
 		}
@@ -42,26 +39,3 @@ export default {
 		});
 	},
 } satisfies ExportedHandler<Env>;
-
-async function sendEmail(env: Env, { to, subject, links }: { to: string; subject: string; links: Link[] }) {
-	const response = await fetch('https://api.postmarkapp.com/email', {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			'X-Postmark-Server-Token': env.POSTMARK_SERVER_TOKEN,
-		},
-		body: JSON.stringify({
-			To: to,
-			From: env.FROM_EMAIL,
-			Subject: subject,
-			TextBody: links.map((link) => `${link.url} - Added ${link.created_at}`).join('\n'),
-			HtmlBody: links.map((link) => `<a href="${link.url}">${link.url}</a> - Added ${link.created_at}`).join('<br />'),
-		}),
-	});
-
-	if (!response.ok) {
-		console.error(`Failed to send email: ${response.statusText}`);
-	} else {
-		return response;
-	}
-}

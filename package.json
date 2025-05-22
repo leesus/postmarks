@@ -11,5 +11,9 @@
 	"devDependencies": {
 		"typescript": "^5.5.2",
 		"wrangler": "^4.16.0"
+	},
+	"dependencies": {
+		"@cloudflare/puppeteer": "^1.0.2",
+		"@langchain/textsplitters": "^0.1.0"
 	}
 }
