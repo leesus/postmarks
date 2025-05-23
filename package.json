@@ -13,7 +13,11 @@
 		"wrangler": "^4.16.0"
 	},
 	"dependencies": {
+		"@ai-sdk/valibot": "^0.1.28",
 		"@cloudflare/puppeteer": "^1.0.2",
-		"@langchain/textsplitters": "^0.1.0"
+		"@langchain/textsplitters": "^0.1.0",
+		"ai": "^4.3.16",
+		"valibot": "^1.1.0",
+		"workers-ai-provider": "^0.5.1"
 	}
 }

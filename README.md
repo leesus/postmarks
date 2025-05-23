@@ -1,10 +1,10 @@
 # Postmarks
 
-We are going to build a simple RAG service that adds, lists and searches bookmarks. These can either be text, or . It receives the requests via Postmarks inbound mail API, and uses Cloudflare Workers platform to do all the smarts.
+We are going to build a simple service that adds, lists and searches links, sort of like your browser bookmarks. It receives the requests via Postmarks inbound mail API, and uses Cloudflare Workers platform to do all the smarts.
 
 ## Prerequisites
 
-Start off by signing up for a Cloudflare Workers free plan and a Postmark plan (make sure you verify this, so you can reply to emails from within the app).
+Start off by signing up for a Cloudflare Workers free plan and a Postmark plan (make sure you verify your domain here, so you can reply to emails from within the app).
 
 ### Let's go
 
@@ -529,3 +529,163 @@ export default {
 ```
 
 Now, if we deploy again `npm run deploy` and send an email to add a link, it should trigger our workflow and add vectors to our database. Nice!
+
+### Make it smarter
+
+Finally, we want to make everything a bit smarter. Now that we have vector embeddings of the content, we can use these to search for a link where the page contains something we are looking for. Let’s use some shiny AI to parse our inbound messages so we don’t have to write a massive unwieldy branching statement.
+
+We’ll leverage Vercel’s AI SDK to manage tool calling, and Workers AI to manage the actual model usage.
+
+Let’s go ahead and install the AI SDK and some helper libraries: `npm i ai @ai-sdk/valibot valibot workers-ai-provider`.
+
+We’ll add a new `queryLinks` method on the Durable Object, which will generate an embedding for the query, and then search against our vectors to see if we can find a match. It'll then either return the link, or null, back to the caller.
+
+```
+async queryLink(email: string, query: string): Promise<Link | null> {
+	const embeddings = await this.env.AI.run('@cf/baai/bge-large-en-v1.5', {
+		text: query,
+	});
+	const vectors = embeddings.data[0];
+
+	const vectorQuery = await this.env.VECTORIZE.query(vectors, { topK: 1, returnMetadata: 'all', namespace: email });
+	let match;
+	if (vectorQuery.matches && vectorQuery.matches.length > 0 && vectorQuery.matches[0]) {
+		[match] = vectorQuery.matches;
+	} else {
+		console.log('No matching vector found');
+		return null;
+	}
+
+	let link = this.links.find((link) => link.url === match!.metadata!.url) as Link | null;
+	return link;
+}
+```
+
+Finally, we will update our worker to use the `generateText` helper from the AI SDK, which will parse our inbound message, route to the correct action (add, query, list), and then finally send an email back to the sender with the results.
+
+```
+import { Postmarks } from './objects/postmarks';
+import { LinksWorkflow } from './workflows/links';
+import { sendEmail } from './services/send-email';
+import { generateText, tool } from 'ai';
+import { valibotSchema } from '@ai-sdk/valibot';
+import * as v from 'valibot';
+import { createWorkersAI } from 'workers-ai-provider';
+
+export { Postmarks, LinksWorkflow };
+
+export default {
+	async fetch(request, env, ctx): Promise<Response> {
+		if (request.method !== 'POST') {
+			return new Response('Not Found', { status: 404 });
+		}
+
+		const message = (await request.json()) as Record<string, string>;
+		const { From: email, Subject: subject, TextBody: body } = message;
+
+		// This creates a new Durable Object instance for the user’s email address
+		const id = env.POSTMARKS.idFromName(email as string);
+		const postmarks = env.POSTMARKS.get(id);
+
+		const workersai = createWorkersAI({
+			binding: env.AI,
+		});
+
+		const response = await generateText({
+			model: workersai('@cf/meta/llama-3.3-70b-instruct-fp8-fast'),
+			system: `You are an assistant that parses incoming email subjects and bodies and routes the request to the appropriate tool.
+				The user has a database of links/urls. The email will either contain a URL, or a keyword that indicates the user wants to list their links, or a query to search for a link.`,
+			prompt: `${subject ? `<email_subject>${subject}</email_subject>` : ''}
+				${body ? `<email_body>${body}</email_body>` : ''}
+
+				You can only perform one of the following actions:
+				- Add a link - whenever the subject or body contains a URL
+				- List all of the user's links
+				- Find a link based on a given query
+			`,
+			tools: {
+				addLink: tool({
+					description: "Add a link to the user's database",
+					parameters: valibotSchema(
+						v.object({
+							url: v.pipe(v.string(), v.url()),
+						})
+					),
+					execute: async ({ url }) => {
+						await env.WORKFLOW.create({ params: { email, url } });
+						return 'Link added';
+					},
+				}),
+				listLinks: tool({
+					description: "List all of the user's links",
+					parameters: valibotSchema(v.object({})),
+					execute: async () => {
+						const links = await postmarks.getLinks();
+						let text: string, html: string;
+
+						if (links.length) {
+							text = links.map((link) => `${link.url} - Added ${link.created_at}`).join('\n');
+							html = links.map((link) => `<a href="${link.url}">${link.url}</a> - Added ${link.created_at}`).join('<br />');
+						} else {
+							text = 'No links found';
+							html = 'No links found';
+						}
+
+						ctx.waitUntil(
+							sendEmail(env, {
+								to: email,
+								subject: 'Your links',
+								text,
+								html,
+							})
+						);
+
+						return text;
+					},
+				}),
+				queryLink: tool({
+					description: 'Search for a link based on a given query',
+					parameters: valibotSchema(
+						v.object({
+							query: v.string(),
+						})
+					),
+					execute: async ({ query }) => {
+						const link = await postmarks.queryLink(email, query);
+						let text: string, html: string;
+
+						if (link) {
+							text = `Your query '${query}' found the following link:\n${link.url} - Added ${link.created_at}`;
+							html = `Your query '${query}' found the following link:<br /><a href="${link.url}">${link.url}</a> - Added ${link.created_at}`;
+						} else {
+							text = `Your query '${query}' did not find any links`;
+							html = `Your query '${query}' did not find any links`;
+						}
+
+						ctx.waitUntil(
+							sendEmail(env, {
+								to: email,
+								subject: 'Your link search results',
+								text,
+								html,
+							})
+						);
+
+						return text;
+					},
+				}),
+			},
+		});
+
+		return new Response(JSON.stringify(response.text), {
+			status: 200,
+		});
+	},
+} satisfies ExportedHandler<Env>;
+```
+
+Here, we are passing off our email subject and body to the LLM, and letting it decide what to do. It does this using tool calls, which parse the message and pass structured parameters to methods we define, which just take care of calling our Durable Object and responding via email.
+
+We covered a lot here, but it shows you how to build a multi-tenant architecture on Durable Objects, provide vector search capabilities and LLM/tool usage.
+
+Give it a try! Send an email containing a link to add it, then once you receive the success email, send another asking for a link with whatever is contained in it, and it should return your original link.
