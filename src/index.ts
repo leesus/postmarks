@@ -8,9 +8,11 @@ import { createWorkersAI } from 'workers-ai-provider';
 
 export { Postmarks, LinksWorkflow };
 
+const POSTMARKS_IP_WHITELIST = ['127.0.0.1', '3.134.147.250', '50.31.156.6', '50.31.156.77', '18.217.206.57'];
+
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
-		if (request.method !== 'POST') {
+		if (!POSTMARKS_IP_WHITELIST.includes(request.headers.get('cf-connecting-ip') as string) || request.method !== 'POST') {
 			return new Response('Not Found', { status: 404 });
 		}
 
