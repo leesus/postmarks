@@ -64,4 +64,21 @@ export class Postmarks extends DurableObject<Env> {
 		let link = this.links.find((link) => link.url === match!.metadata!.url) as Link | null;
 		return link;
 	}
+
+	async clear() {
+		const vectors = await this.ctx.storage.sql.exec(`SELECT * FROM postmarks_vectors`).toArray();
+		let ids = vectors.map((vector) => vector.id as string);
+		const chunks = [];
+		while (ids.length > 0) {
+			chunks.push(ids.splice(0, 100));
+		}
+		for (const chunk of chunks) {
+			await this.env.VECTORIZE.deleteByIds(chunk);
+		}
+		await this.ctx.storage.sql.exec(`DELETE FROM postmarks_vectors`);
+		await this.ctx.storage.sql.exec(`DELETE FROM postmarks`);
+		await this.ctx.storage.sql.exec(`DROP TABLE postmarks_vectors`);
+		await this.ctx.storage.sql.exec(`DROP TABLE postmarks`);
+		await this.ctx.storage.deleteAll();
+	}
 }
